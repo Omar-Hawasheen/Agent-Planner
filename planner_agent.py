@@ -269,6 +269,10 @@ def _call_groq(messages: list[dict], api_key: str) -> str:
         headers={
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
+            # Groq's API sits behind Cloudflare, which blocks requests
+            # with no User-Agent (returns a 403). Python's urllib sends
+            # none by default, so we set one explicitly.
+            "User-Agent": "planner-agent/1.0 (+https://github.com/)",
         },
         method="POST",
     )
