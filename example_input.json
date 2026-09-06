@@ -1,0 +1,13 @@
+{
+  "fixed_commitments": [
+    {"name": "HPC & Big Data lecture", "start": "10:00", "end": "11:30"},
+    {"name": "Badminton", "start": "17:00", "end": "18:30"}
+  ],
+  "tasks": [
+    {"name": "Work on HPC project pipeline", "priority": "urgent", "duration_minutes": 120, "category": "project"},
+    {"name": "Reply to unread emails", "priority": "important", "duration_minutes": 20, "category": "email"},
+    {"name": "Review Discrete Math homework", "priority": "important", "duration_minutes": 45, "category": "study"},
+    {"name": "Buy groceries", "priority": "low", "duration_minutes": 30, "category": "errand"},
+    {"name": "Read one paper for stats course", "priority": "low", "duration_minutes": 40, "category": "study"}
+  ]
+}
