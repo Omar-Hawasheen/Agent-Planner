@@ -17,6 +17,7 @@ Deploy for free:
 """
 
 import json
+import datetime as dt
 from dataclasses import asdict
 
 import streamlit as st
@@ -64,8 +65,17 @@ def load_example():
 
 with st.sidebar:
     st.header("Settings")
-    day_start = st.text_input("Day starts", value="09:00")
-    day_end = st.text_input("Day ends", value="18:00")
+
+    plan_date = st.date_input("Plan for", value=dt.date.today())
+
+    day_start_t = st.time_input(
+        "Day starts", value=dt.time(9, 0), step=dt.timedelta(minutes=15)
+    )
+    day_end_t = st.time_input(
+        "Day ends", value=dt.time(18, 0), step=dt.timedelta(minutes=15)
+    )
+    day_start = day_start_t.strftime("%H:%M")
+    day_end = day_end_t.strftime("%H:%M")
 
     st.divider()
     st.caption(
@@ -102,11 +112,19 @@ with col1:
     with st.form("add_commitment", clear_on_submit=True):
         c_name = st.text_input("Name", key="c_name")
         cc1, cc2 = st.columns(2)
-        c_start = cc1.text_input("Start (HH:MM)", key="c_start")
-        c_end = cc2.text_input("End (HH:MM)", key="c_end")
-        if st.form_submit_button("Add commitment") and c_name and c_start and c_end:
+        c_start_t = cc1.time_input(
+            "Start", value=dt.time(10, 0), step=dt.timedelta(minutes=15), key="c_start"
+        )
+        c_end_t = cc2.time_input(
+            "End", value=dt.time(11, 0), step=dt.timedelta(minutes=15), key="c_end"
+        )
+        if st.form_submit_button("Add commitment") and c_name:
             st.session_state.commitments.append(
-                {"name": c_name, "start": c_start, "end": c_end}
+                {
+                    "name": c_name,
+                    "start": c_start_t.strftime("%H:%M"),
+                    "end": c_end_t.strftime("%H:%M"),
+                }
             )
 
     for i, c in enumerate(st.session_state.commitments):
@@ -168,7 +186,7 @@ if generate:
 if st.session_state.result:
     mode = st.session_state.mode_used
     badge = "🤖 LLM reasoning" if mode == "llm" else "⚙️ Rule-based fallback"
-    st.subheader("Today's plan")
+    st.subheader(f"Plan for {plan_date.strftime('%A, %B %d')}")
     st.caption(badge)
 
     for b in st.session_state.result:
