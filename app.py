@@ -43,6 +43,8 @@ if "result" not in st.session_state:
     st.session_state.result = None
 if "mode_used" not in st.session_state:
     st.session_state.mode_used = None
+if "mode_error" not in st.session_state:
+    st.session_state.mode_error = None
 
 
 def load_example():
@@ -199,11 +201,12 @@ if generate:
         tasks = [Task(**t) for t in st.session_state.tasks]
         commitments = [FixedCommitment(**c) for c in st.session_state.commitments]
         with st.spinner("Planning your day..."):
-            blocks, mode = plan_day(
+            blocks, mode, error = plan_day(
                 tasks, commitments, day_start, day_end, force_mode=force_mode
             )
         st.session_state.result = blocks
         st.session_state.mode_used = mode
+        st.session_state.mode_error = error
 
 # ---- Results ----------------------------------------------------------
 
@@ -212,6 +215,11 @@ if st.session_state.result:
     badge = "🤖 LLM reasoning" if mode == "llm" else "⚙️ Rule-based fallback"
     st.subheader(f"Plan for {plan_date.strftime('%A, %B %d')}")
     st.caption(badge)
+    if st.session_state.mode_error:
+        st.warning(
+            f"AI Agent mode didn't come through, so this is the rule-based "
+            f"fallback instead. Reason: {st.session_state.mode_error}"
+        )
 
     for b in st.session_state.result:
         unscheduled = b.task.startswith("UNSCHEDULED")

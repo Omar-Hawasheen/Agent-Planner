@@ -244,12 +244,20 @@ Return ONLY valid JSON, no prose, no markdown fences, in this exact shape:
 """
 
 
+# Groq deprecates/renames models periodically. Override with the
+# GROQ_MODEL env var (or a Streamlit secret of the same name) if this one
+# gets retired again — check https://console.groq.com/docs/models for the
+# current list.
+DEFAULT_GROQ_MODEL = "openai/gpt-oss-120b"
+
+
 def _call_groq(messages: list[dict], api_key: str) -> str:
     import urllib.request
 
+    model = os.environ.get("GROQ_MODEL", DEFAULT_GROQ_MODEL)
     body = json.dumps(
         {
-            "model": "llama-3.3-70b-versatile",
+            "model": model,
             "messages": messages,
             "temperature": 0.2,
         }
@@ -356,39 +364,42 @@ def plan_day(
     day_start: str = "09:00",
     day_end: str = "18:00",
     force_mode: Optional[str] = None,
-) -> tuple[list[ScheduleBlock], str]:
-    """Returns (blocks, mode_used). mode_used is 'llm' or 'rule-based'.
+) -> tuple[list[ScheduleBlock], str, Optional[str]]:
+    """Returns (blocks, mode_used, error). mode_used is 'llm' or
+    'rule-based'. error is None on success, or a short message describing
+    why the LLM path failed (if it did) even though a rule-based schedule
+    is still returned so the caller always has something usable.
 
     force_mode: None (auto-detect based on GROQ_API_KEY presence, the
-    original CLI behavior), "llm" (require the LLM path, raising if no key
-    is configured), or "rule-based" (skip the LLM entirely, e.g. when the
-    user has explicitly chosen the free deterministic mode in the UI).
+    original CLI behavior), "llm" (require the LLM path), or "rule-based"
+    (skip the LLM entirely, e.g. when the user has explicitly chosen the
+    free deterministic mode in the UI).
     """
     api_key = os.environ.get("GROQ_API_KEY")
 
     if force_mode == "rule-based":
-        return rule_based_plan(tasks, fixed, day_start, day_end), "rule-based"
+        return rule_based_plan(tasks, fixed, day_start, day_end), "rule-based", None
 
     if force_mode == "llm":
         if not api_key:
-            raise ValueError(
-                "AI Agent mode was requested but no GROQ_API_KEY is configured."
-            )
+            blocks = rule_based_plan(tasks, fixed, day_start, day_end)
+            return blocks, "rule-based", "No GROQ_API_KEY is configured."
         try:
-            return llm_plan(tasks, fixed, day_start, day_end, api_key), "llm"
+            blocks = llm_plan(tasks, fixed, day_start, day_end, api_key)
+            return blocks, "llm", None
         except Exception as exc:
-            print(f"[planner_agent] LLM mode failed ({exc}), "
-                  f"falling back to rule-based scheduler.", file=sys.stderr)
-            return rule_based_plan(tasks, fixed, day_start, day_end), "rule-based"
+            blocks = rule_based_plan(tasks, fixed, day_start, day_end)
+            return blocks, "rule-based", str(exc)
 
     # auto-detect (used by the CLI)
     if api_key:
         try:
-            return llm_plan(tasks, fixed, day_start, day_end, api_key), "llm"
+            blocks = llm_plan(tasks, fixed, day_start, day_end, api_key)
+            return blocks, "llm", None
         except Exception as exc:  # network/parsing failure -> fall back
             print(f"[planner_agent] LLM mode failed ({exc}), "
                   f"falling back to rule-based scheduler.", file=sys.stderr)
-    return rule_based_plan(tasks, fixed, day_start, day_end), "rule-based"
+    return rule_based_plan(tasks, fixed, day_start, day_end), "rule-based", None
 
 
 def render_markdown(blocks: list[ScheduleBlock], mode: str) -> str:
@@ -418,7 +429,9 @@ def main():
     tasks = [Task(**t) for t in raw["tasks"]]
     fixed = [FixedCommitment(**f) for f in raw.get("fixed_commitments", [])]
 
-    blocks, mode = plan_day(tasks, fixed, day_start, day_end)
+    blocks, mode, error = plan_day(tasks, fixed, day_start, day_end)
+    if error:
+        print(f"[planner_agent] note: {error}", file=sys.stderr)
 
     md = render_markdown(blocks, mode)
     print(md)
