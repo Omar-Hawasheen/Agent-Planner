@@ -38,8 +38,33 @@ streamlit run app.py
 Opens a local page where you can add tasks and fixed commitments through a
 form, hit "Generate plan", and see the schedule rendered as a timeline with
 the rationale for each block. There's a "Load example day" button to see it
-work instantly, and an optional field to paste a Groq API key so the app
-switches from the rule-based scheduler to real LLM reasoning.
+work instantly, and a sidebar toggle to switch between:
+
+- **Rule-based** — deterministic, no API key needed, always works.
+- **AI Agent** — real LLM reasoning via Groq, using the key configured in
+  Secrets (see below). Visitors never see or enter a key themselves.
+
+### Setting up your Groq key (kept out of the public repo)
+
+The app reads the key from Streamlit's secrets store, never from a visible
+text box, so it's safe to make the repo public:
+
+1. Copy `.streamlit/secrets.toml.example` to `.streamlit/secrets.toml` and
+   put your real key in it. This file is git-ignored — it will never be
+   committed.
+2. For local runs, that's it — `streamlit run app.py` picks it up
+   automatically.
+3. For the deployed app, add the same line under your app's
+   **Settings → Secrets** on Streamlit Community Cloud:
+   ```
+   GROQ_API_KEY = "gsk_your_key_here"
+   ```
+   Every visitor to your deployed app can then select "AI Agent" mode and
+   it just works, powered by your key, without them ever seeing it.
+
+If you ever paste a real key somewhere public by mistake (a commit, a
+screenshot, a chat), treat it as compromised and rotate it from the Groq
+console — old keys can be revoked and a new one generated in seconds.
 
 ### Deploying it for free (so you have a live link, not just local)
 

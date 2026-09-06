@@ -17,6 +17,7 @@ Deploy for free:
 """
 
 import json
+import os
 import datetime as dt
 from dataclasses import asdict
 
@@ -78,15 +79,36 @@ with st.sidebar:
     day_end = day_end_t.strftime("%H:%M")
 
     st.divider()
-    st.caption(
-        "Optional — leave blank to use the deterministic rule-based "
-        "scheduler (no cost, no setup). Add a free Groq key to get real "
-        "LLM reasoning instead."
+    st.subheader("Scheduling mode")
+    mode_choice = st.radio(
+        "How should the plan be generated?",
+        ["Rule-based (deterministic, no API needed)", "AI Agent (LLM reasoning)"],
+        label_visibility="collapsed",
     )
-    groq_key = st.text_input("GROQ_API_KEY", type="password", value="")
-    if groq_key:
-        import os
-        os.environ["GROQ_API_KEY"] = groq_key
+    force_mode = "llm" if mode_choice.startswith("AI Agent") else "rule-based"
+
+    # Resolve the Groq key server-side only — never render it in a visible
+    # text box. Streamlit Cloud's Secrets store is the source of truth in
+    # production; a local .streamlit/secrets.toml (git-ignored) covers
+    # local runs. This means every visitor gets AI Agent mode for free
+    # without ever seeing or needing their own key.
+    dev_key = None
+    try:
+        dev_key = st.secrets.get("GROQ_API_KEY")
+    except Exception:
+        dev_key = None
+    if not dev_key:
+        dev_key = os.environ.get("GROQ_API_KEY")
+
+    if force_mode == "llm":
+        if dev_key:
+            os.environ["GROQ_API_KEY"] = dev_key
+            st.caption("✅ AI Agent mode ready.")
+        else:
+            st.caption(
+                "⚠️ No API key configured yet — this will fall back to "
+                "rule-based until GROQ_API_KEY is added to Secrets."
+            )
 
     st.divider()
     if st.button("Load example day"):
@@ -177,7 +199,9 @@ if generate:
         tasks = [Task(**t) for t in st.session_state.tasks]
         commitments = [FixedCommitment(**c) for c in st.session_state.commitments]
         with st.spinner("Planning your day..."):
-            blocks, mode = plan_day(tasks, commitments, day_start, day_end)
+            blocks, mode = plan_day(
+                tasks, commitments, day_start, day_end, force_mode=force_mode
+            )
         st.session_state.result = blocks
         st.session_state.mode_used = mode
 

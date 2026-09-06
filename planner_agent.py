@@ -355,9 +355,33 @@ def plan_day(
     fixed: list[FixedCommitment],
     day_start: str = "09:00",
     day_end: str = "18:00",
+    force_mode: Optional[str] = None,
 ) -> tuple[list[ScheduleBlock], str]:
-    """Returns (blocks, mode_used). mode_used is 'llm' or 'rule-based'."""
+    """Returns (blocks, mode_used). mode_used is 'llm' or 'rule-based'.
+
+    force_mode: None (auto-detect based on GROQ_API_KEY presence, the
+    original CLI behavior), "llm" (require the LLM path, raising if no key
+    is configured), or "rule-based" (skip the LLM entirely, e.g. when the
+    user has explicitly chosen the free deterministic mode in the UI).
+    """
     api_key = os.environ.get("GROQ_API_KEY")
+
+    if force_mode == "rule-based":
+        return rule_based_plan(tasks, fixed, day_start, day_end), "rule-based"
+
+    if force_mode == "llm":
+        if not api_key:
+            raise ValueError(
+                "AI Agent mode was requested but no GROQ_API_KEY is configured."
+            )
+        try:
+            return llm_plan(tasks, fixed, day_start, day_end, api_key), "llm"
+        except Exception as exc:
+            print(f"[planner_agent] LLM mode failed ({exc}), "
+                  f"falling back to rule-based scheduler.", file=sys.stderr)
+            return rule_based_plan(tasks, fixed, day_start, day_end), "rule-based"
+
+    # auto-detect (used by the CLI)
     if api_key:
         try:
             return llm_plan(tasks, fixed, day_start, day_end, api_key), "llm"
