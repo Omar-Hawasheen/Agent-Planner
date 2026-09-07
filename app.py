@@ -157,18 +157,25 @@ with st.sidebar:
             st.rerun()
     else:
         auth_url = build_auth_url(google_client_id, google_redirect_uri)
-        # target="_top" (not "_self") — Streamlit Community Cloud renders
-        # the app inside its own wrapper frame, so "_self" would only
-        # navigate that inner frame. Google's OAuth pages refuse to load
-        # inside any frame (anti-clickjacking policy) and return a bare
-        # 403 instead. "_top" breaks out to the real top-level tab so the
-        # address bar actually changes and Google's consent screen loads.
+        # target="_blank" (not "_top"/"_self") — confirmed via testing that
+        # Streamlit Community Cloud's wrapper frame blocks a forced
+        # top-level navigation from inside it (target="_top" got silently
+        # blocked on click). Opening a new tab only needs the much more
+        # commonly-granted "allow-popups" permission, so this works
+        # reliably with a normal click. Trade-off: sign-in completes in a
+        # separate tab/session — see the README's "known limitation" note.
         st.markdown(
-            f'<a href="{auth_url}" target="_top" style="display:inline-block;'
+            f'<a href="{auth_url}" target="_blank" style="display:inline-block;'
             f'padding:0.5rem 1rem;background-color:#4285F4;color:white;'
             f'border-radius:0.5rem;text-decoration:none;font-weight:600;">'
-            f'🔗 Connect Google Calendar</a>',
+            f'🔗 Connect Google Calendar (opens a new tab)</a>',
             unsafe_allow_html=True,
+        )
+        st.caption(
+            "Opens Google's sign-in in a new tab. Once you approve access "
+            "there, do the rest of your planning (adding tasks, generating, "
+            "accepting) in that new tab — it's a separate session from "
+            "this one, so anything added here beforehand won't carry over."
         )
 
     st.divider()
