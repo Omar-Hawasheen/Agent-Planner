@@ -157,10 +157,14 @@ with st.sidebar:
             st.rerun()
     else:
         auth_url = build_auth_url(google_client_id, google_redirect_uri)
-        # target="_self" keeps the redirect in the same tab, so the
-        # session that comes back with ?code=... is the same one.
+        # target="_top" (not "_self") — Streamlit Community Cloud renders
+        # the app inside its own wrapper frame, so "_self" would only
+        # navigate that inner frame. Google's OAuth pages refuse to load
+        # inside any frame (anti-clickjacking policy) and return a bare
+        # 403 instead. "_top" breaks out to the real top-level tab so the
+        # address bar actually changes and Google's consent screen loads.
         st.markdown(
-            f'<a href="{auth_url}" target="_self" style="display:inline-block;'
+            f'<a href="{auth_url}" target="_top" style="display:inline-block;'
             f'padding:0.5rem 1rem;background-color:#4285F4;color:white;'
             f'border-radius:0.5rem;text-decoration:none;font-weight:600;">'
             f'🔗 Connect Google Calendar</a>',
