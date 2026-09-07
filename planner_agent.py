@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import sys
 from dataclasses import dataclass, asdict
 from datetime import datetime, timedelta
@@ -135,10 +136,16 @@ def rule_based_plan(
     fixed: list[FixedCommitment],
     day_start: str,
     day_end: str,
+    randomize: bool = False,
 ) -> list[ScheduleBlock]:
     """Greedy scheduler: urgent first, longest deep-work tasks in the
     morning, short tasks batched together, working around fixed
-    commitments. No LLM required."""
+    commitments. No LLM required.
+
+    randomize: when True, ties within the same priority tier are shuffled
+    instead of always breaking the same way — used for the "Retry" button
+    so a second click can produce a genuinely different valid schedule
+    instead of the identical one."""
 
     day_start_dt, day_end_dt = _to_dt(day_start), _to_dt(day_end)
 
@@ -156,11 +163,23 @@ def rule_based_plan(
         free_windows.append((cursor, day_end_dt))
 
     # sort tasks: urgent > important > low, and within a tier, longer
-    # (deep-work) tasks first so they land in the freshest window
-    ordered = sorted(
-        tasks,
-        key=lambda t: (PRIORITY_ORDER.get(t.priority, 3), -t.duration_minutes),
-    )
+    # (deep-work) tasks first so they land in the freshest window — unless
+    # randomize is set, in which case tier order is kept but the order
+    # within each tier is shuffled instead of sorted by duration.
+    if randomize:
+        tiers: dict[int, list[Task]] = {}
+        for t in tasks:
+            tiers.setdefault(PRIORITY_ORDER.get(t.priority, 3), []).append(t)
+        ordered = []
+        for tier in sorted(tiers):
+            group = tiers[tier][:]
+            random.shuffle(group)
+            ordered.extend(group)
+    else:
+        ordered = sorted(
+            tasks,
+            key=lambda t: (PRIORITY_ORDER.get(t.priority, 3), -t.duration_minutes),
+        )
 
     blocks: list[ScheduleBlock] = []
     unscheduled: list[Task] = []
@@ -251,7 +270,7 @@ Return ONLY valid JSON, no prose, no markdown fences, in this exact shape:
 DEFAULT_GROQ_MODEL = "openai/gpt-oss-120b"
 
 
-def _call_groq(messages: list[dict], api_key: str) -> str:
+def _call_groq(messages: list[dict], api_key: str, temperature: float = 0.2) -> str:
     import urllib.request
 
     model = os.environ.get("GROQ_MODEL", DEFAULT_GROQ_MODEL)
@@ -259,7 +278,7 @@ def _call_groq(messages: list[dict], api_key: str) -> str:
         {
             "model": model,
             "messages": messages,
-            "temperature": 0.2,
+            "temperature": temperature,
         }
     ).encode()
 
@@ -287,7 +306,11 @@ def llm_plan(
     day_start: str,
     day_end: str,
     api_key: str,
+    previous_blocks: Optional[list[ScheduleBlock]] = None,
 ) -> list[ScheduleBlock]:
+    """previous_blocks: pass the last schedule shown to the user (from a
+    "Retry" click) to explicitly ask the model for a different, still-valid
+    arrangement instead of repeating the same one."""
     user_prompt = json.dumps(
         {
             "day_start": day_start,
@@ -303,7 +326,22 @@ def llm_plan(
         {"role": "user", "content": user_prompt},
     ]
 
-    raw = _call_groq(messages, api_key)
+    temperature = 0.2
+    if previous_blocks:
+        temperature = 0.7  # encourage a genuinely different arrangement
+        messages.append(
+            {
+                "role": "user",
+                "content": (
+                    "The user asked to retry — give a different valid "
+                    "schedule than this previous one, still following all "
+                    "the rules:\n"
+                    + json.dumps([asdict(b) for b in previous_blocks], indent=2)
+                ),
+            }
+        )
+
+    raw = _call_groq(messages, api_key, temperature=temperature)
     blocks, unscheduled = _parse_llm_json(raw)
     problems = validate_schedule(blocks, fixed, day_start, day_end)
 
@@ -368,6 +406,7 @@ def plan_day(
     day_start: str = "09:00",
     day_end: str = "18:00",
     force_mode: Optional[str] = None,
+    previous_blocks: Optional[list[ScheduleBlock]] = None,
 ) -> tuple[list[ScheduleBlock], str, Optional[str]]:
     """Returns (blocks, mode_used, error). mode_used is 'llm' or
     'rule-based'. error is None on success, or a short message describing
@@ -378,18 +417,27 @@ def plan_day(
     original CLI behavior), "llm" (require the LLM path), or "rule-based"
     (skip the LLM entirely, e.g. when the user has explicitly chosen the
     free deterministic mode in the UI).
+
+    previous_blocks: pass the previously shown schedule to get a different
+    valid arrangement back instead of the same one — used for "Retry".
     """
     api_key = os.environ.get("GROQ_API_KEY")
 
     if force_mode == "rule-based":
-        return rule_based_plan(tasks, fixed, day_start, day_end), "rule-based", None
+        blocks = rule_based_plan(
+            tasks, fixed, day_start, day_end, randomize=bool(previous_blocks)
+        )
+        return blocks, "rule-based", None
 
     if force_mode == "llm":
         if not api_key:
             blocks = rule_based_plan(tasks, fixed, day_start, day_end)
             return blocks, "rule-based", "No GROQ_API_KEY is configured."
         try:
-            blocks = llm_plan(tasks, fixed, day_start, day_end, api_key)
+            blocks = llm_plan(
+                tasks, fixed, day_start, day_end, api_key,
+                previous_blocks=previous_blocks,
+            )
             return blocks, "llm", None
         except Exception as exc:
             blocks = rule_based_plan(tasks, fixed, day_start, day_end)

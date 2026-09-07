@@ -66,6 +66,46 @@ If you ever paste a real key somewhere public by mistake (a commit, a
 screenshot, a chat), treat it as compromised and rotate it from the Groq
 console — old keys can be revoked and a new one generated in seconds.
 
+### Setting up Google Calendar sync (optional)
+
+Accepting a plan can push it straight into your Google Calendar. This
+needs a free Google Cloud project — about 10 minutes, one-time:
+
+1. Go to https://console.cloud.google.com, create a new project (free).
+2. **APIs & Services → Library** → search "Google Calendar API" → Enable.
+3. **APIs & Services → OAuth consent screen** → choose "External" →
+   fill in an app name and your email → add the scope
+   `https://www.googleapis.com/auth/calendar.events` → under "Test users",
+   add your own Google account (and anyone else you want able to connect).
+   Leaving the app in "Testing" status is fine and free — it just means
+   only accounts you've listed as test users can sign in, which is exactly
+   right for a portfolio demo.
+4. **APIs & Services → Credentials → Create Credentials → OAuth client ID**
+   → Application type: "Web application" → under "Authorized redirect
+   URIs" add your deployed app's exact URL (e.g.
+   `https://your-app.streamlit.app`) and, if you want to test locally too,
+   `http://localhost:8501`.
+5. Copy the generated **Client ID** and **Client Secret**.
+6. Add all three to Secrets (same place as `GROQ_API_KEY`, either your
+   local `.streamlit/secrets.toml` or Streamlit Cloud's Settings → Secrets):
+   ```
+   GOOGLE_CLIENT_ID = "your_client_id"
+   GOOGLE_CLIENT_SECRET = "your_client_secret"
+   GOOGLE_REDIRECT_URI = "https://your-app.streamlit.app"
+   ```
+
+Each visitor connects *their own* Google account (the app never touches
+your calendar) — "Connect Google Calendar" in the sidebar sends them
+through Google's real consent screen, and only after they approve does
+"Accept & sync" become clickable.
+
+**Known limitation:** the OAuth redirect briefly sends the browser to
+Google and back. Streamlit's session usually survives that round trip,
+but if you find your tasks disappeared after connecting, that's why —
+just click "Load example day" or re-add your tasks, connect first next
+time, then generate. Worth mentioning as a known trade-off if it comes up
+in an interview, not a bug you need to hide.
+
 ### Deploying it for free (so you have a live link, not just local)
 
 1. Push this folder to a public GitHub repo.
@@ -113,6 +153,18 @@ call that classifies raw items into this Planner's input schema) →
 Agent alone — demoed against a hand-written `example_input.json` — is
 already a complete, demoable piece of agent orchestration: LLM call →
 validation → self-correction → structured output.
+
+## What's new: calendar view, Retry, and Google Calendar sync
+
+- **Visual timeline** — the schedule renders as a colored day-timeline
+  (Google Calendar's day-view look), not just a list.
+- **Retry** — regenerates a different valid schedule. In AI Agent mode the
+  model is explicitly shown the previous arrangement and asked for a
+  different one; in rule-based mode, ties between equal-priority tasks are
+  shuffled so you don't get the identical result twice.
+- **Accept & sync to Google Calendar** — once you're happy with a plan,
+  this pushes each block as a real event on your own Google Calendar (see
+  setup above).
 
 ## Resume line
 

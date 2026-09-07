@@ -3,12 +3,13 @@ Planner Agent — Web Interface
 ------------------------------
 A small Streamlit app that sits on top of planner_agent.py so you can:
   - add tasks and fixed commitments through a form (no JSON editing)
-  - optionally plug in a Groq API key for real LLM reasoning
-  - generate a schedule and see it rendered as a timeline with rationale
-  - see clearly whether the LLM or the rule-based fallback produced it
+  - toggle between rule-based and AI Agent (LLM) scheduling
+  - see the plan rendered as a visual day-timeline (Google Calendar style)
+  - hit Retry to get a different valid arrangement
+  - hit Accept to push the schedule straight into your own Google Calendar
 
 Run locally:
-    pip install streamlit
+    pip install -r requirements.txt
     streamlit run app.py
 
 Deploy for free:
@@ -23,28 +24,38 @@ from dataclasses import asdict
 
 import streamlit as st
 
-from planner_agent import (
-    Task,
-    FixedCommitment,
-    plan_day,
-)
+from planner_agent import Task, FixedCommitment, plan_day
+from calendar_view import render_calendar_html
+from google_calendar import build_auth_url, exchange_code_for_token, create_event, get_email
 
 st.set_page_config(page_title="Planner Agent", page_icon="🗓️", layout="wide")
+
+
+def _get_secret(name: str):
+    """Secrets store first (Streamlit Cloud), env var second (local)."""
+    try:
+        val = st.secrets.get(name)
+    except Exception:
+        val = None
+    return val or os.environ.get(name)
+
 
 # --------------------------------------------------------------------------
 # Session state setup
 # --------------------------------------------------------------------------
 
-if "tasks" not in st.session_state:
-    st.session_state.tasks = []
-if "commitments" not in st.session_state:
-    st.session_state.commitments = []
-if "result" not in st.session_state:
-    st.session_state.result = None
-if "mode_used" not in st.session_state:
-    st.session_state.mode_used = None
-if "mode_error" not in st.session_state:
-    st.session_state.mode_error = None
+for key, default in {
+    "tasks": [],
+    "commitments": [],
+    "result": None,
+    "mode_used": None,
+    "mode_error": None,
+    "gcal_access_token": None,
+    "gcal_email": None,
+    "gcal_connect_error": None,
+}.items():
+    if key not in st.session_state:
+        st.session_state[key] = default
 
 
 def load_example():
@@ -61,6 +72,31 @@ def load_example():
     ]
     st.session_state.result = None
 
+
+# --------------------------------------------------------------------------
+# Google OAuth setup + callback handling (must run before any UI renders,
+# since it may consume ?code=... from the URL and rerun)
+# --------------------------------------------------------------------------
+
+google_client_id = _get_secret("GOOGLE_CLIENT_ID")
+google_client_secret = _get_secret("GOOGLE_CLIENT_SECRET")
+google_redirect_uri = _get_secret("GOOGLE_REDIRECT_URI")
+google_configured = bool(google_client_id and google_client_secret and google_redirect_uri)
+
+if google_configured and not st.session_state.gcal_access_token:
+    code = st.query_params.get("code")
+    if code:
+        try:
+            token_data = exchange_code_for_token(
+                google_client_id, google_client_secret, google_redirect_uri, code
+            )
+            st.session_state.gcal_access_token = token_data.get("access_token")
+            st.session_state.gcal_email = get_email(st.session_state.gcal_access_token)
+            st.session_state.gcal_connect_error = None
+        except Exception as exc:
+            st.session_state.gcal_connect_error = str(exc)
+        st.query_params.clear()
+        st.rerun()
 
 # --------------------------------------------------------------------------
 # Sidebar — settings
@@ -89,19 +125,7 @@ with st.sidebar:
     )
     force_mode = "llm" if mode_choice.startswith("AI Agent") else "rule-based"
 
-    # Resolve the Groq key server-side only — never render it in a visible
-    # text box. Streamlit Cloud's Secrets store is the source of truth in
-    # production; a local .streamlit/secrets.toml (git-ignored) covers
-    # local runs. This means every visitor gets AI Agent mode for free
-    # without ever seeing or needing their own key.
-    dev_key = None
-    try:
-        dev_key = st.secrets.get("GROQ_API_KEY")
-    except Exception:
-        dev_key = None
-    if not dev_key:
-        dev_key = os.environ.get("GROQ_API_KEY")
-
+    dev_key = _get_secret("GROQ_API_KEY")
     if force_mode == "llm":
         if dev_key:
             os.environ["GROQ_API_KEY"] = dev_key
@@ -111,6 +135,37 @@ with st.sidebar:
                 "⚠️ No API key configured yet — this will fall back to "
                 "rule-based until GROQ_API_KEY is added to Secrets."
             )
+
+    st.divider()
+    st.subheader("Google Calendar")
+    tz_name = st.text_input("Timezone (IANA)", value="Asia/Amman")
+
+    if st.session_state.gcal_connect_error:
+        st.error(f"Connection failed: {st.session_state.gcal_connect_error}")
+
+    if not google_configured:
+        st.caption(
+            "Not set up yet — add GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET / "
+            "GOOGLE_REDIRECT_URI to Secrets to enable syncing (see README)."
+        )
+    elif st.session_state.gcal_access_token:
+        who = f" as {st.session_state.gcal_email}" if st.session_state.gcal_email else ""
+        st.caption(f"✅ Connected{who}")
+        if st.button("Disconnect"):
+            st.session_state.gcal_access_token = None
+            st.session_state.gcal_email = None
+            st.rerun()
+    else:
+        auth_url = build_auth_url(google_client_id, google_redirect_uri)
+        # target="_self" keeps the redirect in the same tab, so the
+        # session that comes back with ?code=... is the same one.
+        st.markdown(
+            f'<a href="{auth_url}" target="_self" style="display:inline-block;'
+            f'padding:0.5rem 1rem;background-color:#4285F4;color:white;'
+            f'border-radius:0.5rem;text-decoration:none;font-weight:600;">'
+            f'🔗 Connect Google Calendar</a>',
+            unsafe_allow_html=True,
+        )
 
     st.divider()
     if st.button("Load example day"):
@@ -123,9 +178,9 @@ with st.sidebar:
 
 st.title("🗓️ Planner Agent")
 st.caption(
-    "Part of a Collector → Triage → **Planner** agent pipeline. This screen "
-    "drives the Planner Agent: add tasks and fixed commitments, then "
-    "generate a validated daily schedule with reasoning per block."
+    "Part of a Collector → Triage → **Planner** agent pipeline. Add tasks "
+    "and fixed commitments, generate a plan, then Retry for a different "
+    "arrangement or Accept to sync it to your Google Calendar."
 )
 
 col1, col2 = st.columns(2)
@@ -221,14 +276,84 @@ if st.session_state.result:
             f"fallback instead. Reason: {st.session_state.mode_error}"
         )
 
-    for b in st.session_state.result:
-        unscheduled = b.task.startswith("UNSCHEDULED")
-        box = st.container(border=True)
-        if unscheduled:
-            box.markdown(f"⚠️ **{b.task}**")
-        else:
-            box.markdown(f"**{b.start}–{b.end}**  ·  {b.task}")
-        box.caption(b.rationale)
+    # Visual calendar-style timeline
+    st.markdown(
+        render_calendar_html(st.session_state.result, day_start, day_end),
+        unsafe_allow_html=True,
+    )
+
+    unscheduled_blocks = [b for b in st.session_state.result if b.task.startswith("UNSCHEDULED")]
+    for b in unscheduled_blocks:
+        st.warning(f"⚠️ {b.task}\n\n{b.rationale}")
+
+    with st.expander("Details & rationale"):
+        for b in st.session_state.result:
+            if b.task.startswith("UNSCHEDULED"):
+                continue
+            st.markdown(f"**{b.start}–{b.end}**  ·  {b.task}")
+            st.caption(b.rationale)
 
     with st.expander("Raw JSON output"):
         st.code(json.dumps([asdict(b) for b in st.session_state.result], indent=2), language="json")
+
+    st.divider()
+    retry_col, accept_col = st.columns(2)
+
+    with retry_col:
+        if st.button("🔁 Retry — get a different schedule", use_container_width=True):
+            tasks = [Task(**t) for t in st.session_state.tasks]
+            commitments = [FixedCommitment(**c) for c in st.session_state.commitments]
+            previous = [b for b in st.session_state.result if not b.task.startswith("UNSCHEDULED")]
+            with st.spinner("Generating an alternative..."):
+                blocks, mode, error = plan_day(
+                    tasks, commitments, day_start, day_end,
+                    force_mode=force_mode, previous_blocks=previous,
+                )
+            st.session_state.result = blocks
+            st.session_state.mode_used = mode
+            st.session_state.mode_error = error
+            st.rerun()
+
+    with accept_col:
+        if not google_configured:
+            st.button(
+                "✅ Accept & sync to Google Calendar", disabled=True,
+                use_container_width=True,
+                help="Google Calendar sync isn't set up yet — see README.",
+            )
+        elif not st.session_state.gcal_access_token:
+            st.button(
+                "✅ Accept & sync to Google Calendar", disabled=True,
+                use_container_width=True,
+                help="Connect Google Calendar in the sidebar first.",
+            )
+        elif st.button("✅ Accept & sync to Google Calendar", type="primary", use_container_width=True):
+            scheduled = [b for b in st.session_state.result if not b.task.startswith("UNSCHEDULED")]
+            created, failed = 0, []
+            with st.spinner("Adding events to your Google Calendar..."):
+                for b in scheduled:
+                    try:
+                        start_dt = dt.datetime.combine(
+                            plan_date, dt.datetime.strptime(b.start, "%H:%M").time()
+                        )
+                        end_dt = dt.datetime.combine(
+                            plan_date, dt.datetime.strptime(b.end, "%H:%M").time()
+                        )
+                        create_event(
+                            st.session_state.gcal_access_token,
+                            summary=b.task,
+                            start_dt=start_dt,
+                            end_dt=end_dt,
+                            timezone=tz_name,
+                            description=b.rationale,
+                        )
+                        created += 1
+                    except Exception as exc:
+                        failed.append((b.task, str(exc)))
+            if created:
+                st.success(f"Added {created} event(s) to your Google Calendar.")
+            if failed:
+                st.error(
+                    "Some events failed: "
+                    + "; ".join(f"{n} ({e})" for n, e in failed)
+                )
