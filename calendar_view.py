@@ -40,15 +40,28 @@ def _minutes(hhmm: str) -> int:
 
 
 def _format_hour_label(hour: int) -> str:
-    dt = datetime.strptime(f"{hour:02d}:00", "%H:%M")
-    return dt.strftime("%-I %p") if hour != 0 else "12 AM"
+    # hour may be >= 24 (representing a time past midnight on a day that
+    # wraps, e.g. day_end="00:00"); wrap it back into 0-23 purely for the
+    # label text — the unwrapped value is still used for vertical position.
+    h = hour % 24
+    dt = datetime.strptime(f"{h:02d}:00", "%H:%M")
+    return dt.strftime("%-I %p") if h != 0 else "12 AM"
 
 
-def render_calendar_html(blocks, day_start: str, day_end: str) -> str:
-    """Returns an HTML string ready for st.markdown(html, unsafe_allow_html=True)."""
+def render_calendar_html(blocks, day_start: str, day_end: str, fixed=None) -> str:
+    """Returns an HTML string ready for st.markdown(html, unsafe_allow_html=True).
+
+    fixed: optional list of fixed commitments (each with .name/.start/.end,
+    or dicts with the same keys) — rendered as distinct muted/striped
+    blocks so they're visible on the timeline even though the scheduler
+    treats them only as constraints, not as blocks it produces itself."""
 
     start_min = _minutes(day_start)
-    end_min = _minutes(day_end)
+    raw_end_min = _minutes(day_end)
+    # An end time at or before the start (e.g. day_end="00:00" meaning
+    # midnight) means the day continues into the next calendar day rather
+    # than being a zero/negative-length window.
+    end_min = raw_end_min + 1440 if raw_end_min <= start_min else raw_end_min
     total_minutes = max(end_min - start_min, 60)
     total_height = int(total_minutes / 60 * PX_PER_HOUR)
 
@@ -69,6 +82,38 @@ def render_calendar_html(blocks, day_start: str, day_end: str) -> str:
             f'text-align:right; padding-right:8px;">{_format_hour_label(h)}</div>'
         )
 
+    # Fixed commitments — rendered behind task blocks, visually distinct
+    # (muted, striped) so it's clear they're constraints, not agent picks.
+    fixed_divs = []
+    for fc in (fixed or []):
+        name = fc["name"] if isinstance(fc, dict) else fc.name
+        fc_start = fc["start"] if isinstance(fc, dict) else fc.start
+        fc_end = fc["end"] if isinstance(fc, dict) else fc.end
+        try:
+            f_start, f_end = _minutes(fc_start), _minutes(fc_end)
+        except ValueError:
+            continue
+        if f_start < start_min:
+            f_start += 1440
+        if f_end < start_min:
+            f_end += 1440
+        top = int((f_start - start_min) / 60 * PX_PER_HOUR)
+        height = max(int((f_end - f_start) / 60 * PX_PER_HOUR), 22)
+        fixed_divs.append(
+            f'<div title="Fixed commitment" style="'
+            f'position:absolute; top:{top}px; left:60px; right:8px; '
+            f'height:{height}px; background:repeating-linear-gradient('
+            f'45deg, rgba(255,255,255,0.06), rgba(255,255,255,0.06) 6px, '
+            f'rgba(255,255,255,0.02) 6px, rgba(255,255,255,0.02) 12px); '
+            f'border:1px dashed rgba(255,255,255,0.3); border-radius:6px; '
+            f'padding:4px 8px; overflow:hidden;">'
+            f'<div style="font-size:12px; font-weight:600; '
+            f'color:rgba(255,255,255,0.75); line-height:1.2; '
+            f'white-space:nowrap; text-overflow:ellipsis; overflow:hidden;">'
+            f'{fc_start}–{fc_end}  ·  {name} (fixed)</div>'
+            f'</div>'
+        )
+
     # Scheduled blocks (skip unscheduled ones — those render separately)
     block_divs = []
     scheduled = [b for b in blocks if not b.task.startswith("UNSCHEDULED")]
@@ -77,6 +122,12 @@ def render_calendar_html(blocks, day_start: str, day_end: str) -> str:
             b_start, b_end = _minutes(b.start), _minutes(b.end)
         except ValueError:
             continue
+        # Same wraparound logic as above: a block time earlier than the
+        # day's start must belong to the portion past midnight.
+        if b_start < start_min:
+            b_start += 1440
+        if b_end < start_min:
+            b_end += 1440
         top = int((b_start - start_min) / 60 * PX_PER_HOUR)
         height = max(int((b_end - b_start) / 60 * PX_PER_HOUR), 22)
         color = _color_for(b.task)
@@ -96,6 +147,7 @@ def render_calendar_html(blocks, day_start: str, day_end: str) -> str:
                 margin-top:8px; margin-bottom:16px;
                 border-left:1px solid rgba(255,255,255,0.08);">
         {''.join(hour_lines)}
+        {''.join(fixed_divs)}
         {''.join(block_divs)}
     </div>
     """

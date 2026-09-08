@@ -289,7 +289,10 @@ if st.session_state.result:
 
     # Visual calendar-style timeline
     st.markdown(
-        render_calendar_html(st.session_state.result, day_start, day_end),
+        render_calendar_html(
+            st.session_state.result, day_start, day_end,
+            fixed=st.session_state.commitments,
+        ),
         unsafe_allow_html=True,
     )
 

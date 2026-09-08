@@ -71,6 +71,20 @@ def _to_hhmm(dt: datetime) -> str:
     return dt.strftime("%H:%M")
 
 
+def _day_bounds(day_start: str, day_end: str) -> tuple[datetime, datetime]:
+    """Parses the work day into datetimes. If day_end is at or before
+    day_start (e.g. day_end="00:00" meaning midnight), it's treated as
+    continuing into the next calendar day rather than an invalid/negative
+    window. strftime("%H:%M") on the resulting datetimes still displays
+    correctly regardless of which day they landed on, so nothing downstream
+    needs to know this happened."""
+    start_dt = _to_dt(day_start)
+    end_dt = _to_dt(day_end)
+    if end_dt <= start_dt:
+        end_dt += timedelta(days=1)
+    return start_dt, end_dt
+
+
 def _overlaps(a_start, a_end, b_start, b_end) -> bool:
     return a_start < b_end and b_start < a_end
 
@@ -87,7 +101,7 @@ def validate_schedule(
 ) -> list[str]:
     """Returns a list of problems found. Empty list = valid schedule."""
     problems = []
-    day_start_dt, day_end_dt = _to_dt(day_start), _to_dt(day_end)
+    day_start_dt, day_end_dt = _day_bounds(day_start, day_end)
 
     parsed = []
     for b in blocks:
@@ -147,7 +161,7 @@ def rule_based_plan(
     so a second click can produce a genuinely different valid schedule
     instead of the identical one."""
 
-    day_start_dt, day_end_dt = _to_dt(day_start), _to_dt(day_end)
+    day_start_dt, day_end_dt = _day_bounds(day_start, day_end)
 
     # free windows = work day minus fixed commitments
     busy = sorted(
