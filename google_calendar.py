@@ -95,13 +95,19 @@ def create_event(
     end_dt: datetime,
     timezone: str,
     description: str = "",
+    color_id: Optional[str] = None,
 ) -> dict:
+    """color_id: one of Google Calendar's 11 fixed event colors ("1"-"11").
+    See EVENT_COLORS below for the name each number maps to. Omit to use
+    the calendar's default color."""
     body = {
         "summary": summary,
         "description": description,
         "start": {"dateTime": start_dt.isoformat(), "timeZone": timezone},
         "end": {"dateTime": end_dt.isoformat(), "timeZone": timezone},
     }
+    if color_id:
+        body["colorId"] = color_id
     resp = requests.post(
         CALENDAR_EVENTS_ENDPOINT,
         headers={
@@ -113,3 +119,16 @@ def create_event(
     )
     resp.raise_for_status()
     return resp.json()
+
+
+# Google Calendar's fixed event-color palette — colorId is always "1".."11",
+# never a hex code. Order chosen so adjacent numbers look visually distinct.
+EVENT_COLORS = ["9", "11", "10", "5", "3", "7", "6", "2", "4", "1"]
+FIXED_COMMITMENT_COLOR = "8"  # Graphite — consistent, muted, same idea as
+                              # the dashed/striped style used in-app
+
+
+def color_for(name: str) -> str:
+    """Deterministic colorId for a task name, so the same task keeps the
+    same color across a retry rather than jumping around."""
+    return EVENT_COLORS[hash(name) % len(EVENT_COLORS)]

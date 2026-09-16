@@ -27,7 +27,10 @@ import streamlit as st
 from planner_agent import Task, FixedCommitment, plan_day
 from calendar_view import render_calendar_html
 from weekly_schedule import DAY_ORDER, commitments_for, day_name_for_date
-from google_calendar import build_auth_url, exchange_code_for_token, create_event, get_email
+from google_calendar import (
+    build_auth_url, exchange_code_for_token, create_event, get_email,
+    color_for, FIXED_COMMITMENT_COLOR,
+)
 
 st.set_page_config(page_title="Planner Agent", page_icon="🗓️", layout="wide")
 
@@ -398,23 +401,23 @@ if st.session_state.result:
         elif st.button("✅ Accept & sync to Google Calendar", type="primary", use_container_width=True):
             scheduled = [b for b in st.session_state.result if not b.task.startswith("UNSCHEDULED")]
 
-            # Build one flat list of (summary, start, end, description) so
-            # fixed commitments land on the calendar alongside the agent's
-            # blocks — otherwise the synced day has unexplained gaps where
-            # classes and gym actually sit.
+            # Build one flat list of (summary, start, end, description,
+            # is_fixed) so fixed commitments land on the calendar alongside
+            # the agent's blocks — otherwise the synced day has unexplained
+            # gaps where classes and gym actually sit.
             to_sync = [
-                (b.task, b.start, b.end, b.rationale) for b in scheduled
+                (b.task, b.start, b.end, b.rationale, False) for b in scheduled
             ]
             if sync_commitments:
                 to_sync += [
-                    (c["name"], c["start"], c["end"], "Fixed commitment")
+                    (c["name"], c["start"], c["end"], "Fixed commitment", True)
                     for c in st.session_state.commitments
                 ]
             to_sync.sort(key=lambda x: x[1])
 
             created, failed = 0, []
             with st.spinner("Adding events to your Google Calendar..."):
-                for summary, s_str, e_str, desc in to_sync:
+                for summary, s_str, e_str, desc, is_fixed in to_sync:
                     try:
                         start_dt = dt.datetime.combine(
                             plan_date, dt.datetime.strptime(s_str, "%H:%M").time()
@@ -433,6 +436,10 @@ if st.session_state.result:
                             end_dt=end_dt,
                             timezone=tz_name,
                             description=desc,
+                            color_id=(
+                                FIXED_COMMITMENT_COLOR if is_fixed
+                                else color_for(summary)
+                            ),
                         )
                         created += 1
                     except Exception as exc:
