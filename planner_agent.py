@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import os
 import random
+import re
 import sys
 from dataclasses import dataclass, asdict
 from datetime import datetime, timedelta
@@ -57,6 +58,35 @@ class ScheduleBlock:
 
 
 PRIORITY_ORDER = {"urgent": 0, "important": 1, "low": 2}
+
+# Flexible tasks are kept out of the morning by default — mornings are
+# reserved unless a task is explicitly opted in. A task opts in by putting
+# a bracket in its name: either wrapping the whole name, "[Make Resume]",
+# or tagging it, "Make Resume [morning]". Anything in square brackets or
+# parentheses counts.
+DEFAULT_MORNING_END = "12:00"
+
+# Breathing room inserted between two back-to-back flexible tasks. This is
+# never inserted between a task and a fixed commitment — only task-to-task.
+BREAK_MINUTES = 5
+
+_BRACKET_RE = re.compile(r"[\[\(][^\]\)]*[\]\)]")
+
+
+def allows_morning(task_name: str) -> bool:
+    """True if this task may be scheduled before the morning cutoff.
+
+    The opt-in marker is a bracket anywhere in the task name — so
+    "[Make Resume]", "Make Resume [morning]" and "Make Resume (am)" all
+    qualify, while a plain "Make Resume" does not."""
+    return bool(_BRACKET_RE.search(task_name))
+
+
+def strip_brackets(task_name: str) -> str:
+    """Task name with any bracketed marker removed, for display. Keeps a
+    name that is entirely bracketed intact rather than returning nothing."""
+    cleaned = _BRACKET_RE.sub("", task_name).strip(" -–—,")
+    return cleaned or task_name.strip("[]() ")
 
 
 # --------------------------------------------------------------------------
@@ -151,10 +181,15 @@ def rule_based_plan(
     day_start: str,
     day_end: str,
     randomize: bool = False,
+    morning_end: str = DEFAULT_MORNING_END,
 ) -> list[ScheduleBlock]:
-    """Greedy scheduler: urgent first, longest deep-work tasks in the
-    morning, short tasks batched together, working around fixed
-    commitments. No LLM required.
+    """Greedy scheduler: urgent first, longest deep-work tasks in the first
+    long stretch available, short tasks batched together, working around
+    fixed commitments. No LLM required.
+
+    Mornings (before morning_end) are left clear for flexible tasks unless
+    a task opts in by putting a bracket in its name — see allows_morning().
+    A BREAK_MINUTES gap is left between consecutive tasks.
 
     randomize: when True, ties within the same priority tier are shuffled
     instead of always breaking the same way — used for the "Retry" button
@@ -181,9 +216,11 @@ def rule_based_plan(
     # randomize is set, in which case tier order is kept but the order
     # within each tier is shuffled instead of sorted by duration.
     if randomize:
-        tiers: dict[int, list[Task]] = {}
+        tiers: dict[tuple[int, int], list[Task]] = {}
         for t in tasks:
-            tiers.setdefault(PRIORITY_ORDER.get(t.priority, 3), []).append(t)
+            key = (0 if allows_morning(t.name) else 1,
+                   PRIORITY_ORDER.get(t.priority, 3))
+            tiers.setdefault(key, []).append(t)
         ordered = []
         for tier in sorted(tiers):
             group = tiers[tier][:]
@@ -192,33 +229,75 @@ def rule_based_plan(
     else:
         ordered = sorted(
             tasks,
-            key=lambda t: (PRIORITY_ORDER.get(t.priority, 3), -t.duration_minutes),
+            key=lambda t: (
+                # Bracketed tasks go first so they actually occupy the
+                # morning they were opted into, rather than being permitted
+                # there but pushed later by priority ordering.
+                0 if allows_morning(t.name) else 1,
+                PRIORITY_ORDER.get(t.priority, 3),
+                -t.duration_minutes,
+            ),
         )
 
     blocks: list[ScheduleBlock] = []
     unscheduled: list[Task] = []
 
-    for task in ordered:
-        placed = False
+    morning_end_dt = _to_dt(morning_end)
+    if morning_end_dt <= day_start_dt:
+        # A cutoff at or before the day's start means "no morning guard".
+        morning_end_dt = day_start_dt
+
+    # Tracks the end of the last task placed in each window, so the 5-minute
+    # break is only applied task-to-task and never eats into the start of a
+    # window that begins right after a fixed commitment.
+    last_task_end: dict[int, datetime] = {}
+
+    def _try_place(task: Task, respect_morning: bool):
+        """Finds the first window that fits. Returns (index, start, end) or
+        None. When respect_morning is set, slots before the cutoff are
+        skipped unless the task's name opts in with a bracket."""
         needed = timedelta(minutes=task.duration_minutes)
+        guard = respect_morning and not allows_morning(task.name)
         for i, (ws, we) in enumerate(free_windows):
-            if we - ws >= needed:
-                block_start, block_end = ws, ws + needed
-                rationale = _rationale_for(task, block_start)
-                blocks.append(
-                    ScheduleBlock(
-                        start=_to_hhmm(block_start),
-                        end=_to_hhmm(block_end),
-                        task=task.name,
-                        rationale=rationale,
-                    )
-                )
-                # shrink the window
-                free_windows[i] = (block_end, we)
-                placed = True
-                break
-        if not placed:
+            candidate = ws
+            # 5-minute breather after a previous task in this same window
+            if i in last_task_end and candidate == last_task_end[i]:
+                candidate = candidate + timedelta(minutes=BREAK_MINUTES)
+            if guard and candidate < morning_end_dt:
+                candidate = max(candidate, morning_end_dt)
+            if we - candidate >= needed:
+                return i, candidate, candidate + needed
+        return None
+
+    for task in ordered:
+        # First pass keeps mornings clear; if the task simply cannot fit in
+        # the rest of the day, a second pass allows the morning rather than
+        # dropping the task entirely.
+        spot = _try_place(task, respect_morning=True)
+        pushed_to_morning = False
+        if spot is None:
+            spot = _try_place(task, respect_morning=False)
+            pushed_to_morning = spot is not None
+
+        if spot is None:
             unscheduled.append(task)
+            continue
+
+        i, block_start, block_end = spot
+        rationale = _rationale_for(
+            task, block_start, morning_end_dt, pushed_to_morning
+        )
+        blocks.append(
+            ScheduleBlock(
+                start=_to_hhmm(block_start),
+                end=_to_hhmm(block_end),
+                task=task.name,
+                rationale=rationale,
+            )
+        )
+        ws, we = free_windows[i]
+        free_windows[i] = (block_end, we)
+        last_task_end[i] = block_end
 
     if unscheduled:
         names = ", ".join(t.name for t in unscheduled)
@@ -235,11 +314,23 @@ def rule_based_plan(
     return sorted(blocks, key=lambda b: b.start)
 
 
-def _rationale_for(task: Task, block_start: datetime) -> str:
+def _rationale_for(
+    task: Task,
+    block_start: datetime,
+    morning_end_dt: datetime | None = None,
+    pushed_to_morning: bool = False,
+) -> str:
+    if pushed_to_morning:
+        return (
+            "Placed in the morning as a last resort — nothing later in the "
+            "day was free. Bracket the name to allow this without the warning."
+        )
+    if allows_morning(task.name) and morning_end_dt and block_start < morning_end_dt:
+        return "Bracketed, so it was allowed into the morning."
     if task.duration_minutes >= 90:
         return (
-            f"Scheduled early/uninterrupted since it's a long "
-            f"({task.duration_minutes}-min) deep-work item."
+            f"Scheduled in the first long free stretch after the morning "
+            f"since it's a {task.duration_minutes}-min deep-work item."
         )
     if task.priority == "urgent":
         return "Marked urgent, so placed as early as it would fit."
@@ -259,9 +350,17 @@ produce a JSON schedule.
 Rules:
 - Do not schedule anything during a fixed commitment.
 - Do not schedule anything outside the given work day window.
-- Put long deep-work tasks (>= 60 min) in the morning or right after the \
-  first fixed commitment, when focus is freshest.
-- Batch short tasks (<= 20 min) together rather than scattering them.
+- MORNING RULE: do not schedule a task before "morning_end" unless its \
+  name contains a bracket, e.g. "[Make Resume]" or "Make Resume [morning]". \
+  Bracketed tasks may go in the morning. Everything else waits until after \
+  morning_end. Only break this rule if a task has nowhere else to fit, and \
+  say so in its rationale if you do.
+- Leave a 5-minute gap between two consecutive tasks. No gap is needed \
+  between a task and a fixed commitment.
+- Put long deep-work tasks (>= 60 min) in the first long uninterrupted \
+  stretch available after morning_end, when focus is freshest.
+- Batch short tasks (<= 20 min) together rather than scattering them, \
+  still with the 5-minute gap between them.
 - Respect priority: urgent > important > low.
 - If something genuinely does not fit, include it in "unscheduled" instead \
   of forcing an overlap.
@@ -321,6 +420,7 @@ def llm_plan(
     day_end: str,
     api_key: str,
     previous_blocks: Optional[list[ScheduleBlock]] = None,
+    morning_end: str = DEFAULT_MORNING_END,
 ) -> list[ScheduleBlock]:
     """previous_blocks: pass the last schedule shown to the user (from a
     "Retry" click) to explicitly ask the model for a different, still-valid
@@ -329,6 +429,8 @@ def llm_plan(
         {
             "day_start": day_start,
             "day_end": day_end,
+            "morning_end": morning_end,
+            "break_minutes": BREAK_MINUTES,
             "fixed_commitments": [asdict(f) for f in fixed],
             "tasks": [asdict(t) for t in tasks],
         },
@@ -421,6 +523,7 @@ def plan_day(
     day_end: str = "18:00",
     force_mode: Optional[str] = None,
     previous_blocks: Optional[list[ScheduleBlock]] = None,
+    morning_end: str = DEFAULT_MORNING_END,
 ) -> tuple[list[ScheduleBlock], str, Optional[str]]:
     """Returns (blocks, mode_used, error). mode_used is 'llm' or
     'rule-based'. error is None on success, or a short message describing
@@ -439,33 +542,45 @@ def plan_day(
 
     if force_mode == "rule-based":
         blocks = rule_based_plan(
-            tasks, fixed, day_start, day_end, randomize=bool(previous_blocks)
+            tasks, fixed, day_start, day_end,
+            randomize=bool(previous_blocks), morning_end=morning_end,
         )
         return blocks, "rule-based", None
 
     if force_mode == "llm":
         if not api_key:
-            blocks = rule_based_plan(tasks, fixed, day_start, day_end)
+            blocks = rule_based_plan(
+                tasks, fixed, day_start, day_end, morning_end=morning_end
+            )
             return blocks, "rule-based", "No GROQ_API_KEY is configured."
         try:
             blocks = llm_plan(
                 tasks, fixed, day_start, day_end, api_key,
-                previous_blocks=previous_blocks,
+                previous_blocks=previous_blocks, morning_end=morning_end,
             )
             return blocks, "llm", None
         except Exception as exc:
-            blocks = rule_based_plan(tasks, fixed, day_start, day_end)
+            blocks = rule_based_plan(
+                tasks, fixed, day_start, day_end, morning_end=morning_end
+            )
             return blocks, "rule-based", str(exc)
 
     # auto-detect (used by the CLI)
     if api_key:
         try:
-            blocks = llm_plan(tasks, fixed, day_start, day_end, api_key)
+            blocks = llm_plan(
+                tasks, fixed, day_start, day_end, api_key,
+                morning_end=morning_end,
+            )
             return blocks, "llm", None
         except Exception as exc:  # network/parsing failure -> fall back
             print(f"[planner_agent] LLM mode failed ({exc}), "
                   f"falling back to rule-based scheduler.", file=sys.stderr)
-    return rule_based_plan(tasks, fixed, day_start, day_end), "rule-based", None
+    return (
+        rule_based_plan(tasks, fixed, day_start, day_end, morning_end=morning_end),
+        "rule-based",
+        None,
+    )
 
 
 def render_markdown(blocks: list[ScheduleBlock], mode: str) -> str:

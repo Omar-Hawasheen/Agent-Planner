@@ -26,6 +26,7 @@ import streamlit as st
 
 from planner_agent import Task, FixedCommitment, plan_day
 from calendar_view import render_calendar_html
+from weekly_schedule import DAY_ORDER, commitments_for, day_name_for_date
 from google_calendar import build_auth_url, exchange_code_for_token, create_event, get_email
 
 st.set_page_config(page_title="Planner Agent", page_icon="🗓️", layout="wide")
@@ -53,6 +54,7 @@ for key, default in {
     "gcal_access_token": None,
     "gcal_email": None,
     "gcal_connect_error": None,
+    "loaded_day": None,
 }.items():
     if key not in st.session_state:
         st.session_state[key] = default
@@ -115,6 +117,15 @@ with st.sidebar:
     )
     day_start = day_start_t.strftime("%H:%M")
     day_end = day_end_t.strftime("%H:%M")
+
+    morning_end_t = st.time_input(
+        "Keep mornings clear until",
+        value=dt.time(12, 0),
+        step=dt.timedelta(minutes=15),
+        help="Flexible tasks won't be scheduled before this time unless "
+             "you put a bracket in the task name, e.g. [Make Resume].",
+    )
+    morning_end = morning_end_t.strftime("%H:%M")
 
     st.divider()
     st.subheader("Scheduling mode")
@@ -199,6 +210,36 @@ col1, col2 = st.columns(2)
 # ---- Fixed commitments -----------------------------------------------
 with col1:
     st.subheader("Fixed commitments")
+
+    # Load a whole day's recurring timetable in one click, instead of
+    # re-entering the same classes/gym slots every session.
+    suggested_day = day_name_for_date(plan_date)
+    st.caption(
+        f"Load your weekly timetable — {plan_date.strftime('%b %d')} is a "
+        f"**{suggested_day}**."
+    )
+    day_cols = st.columns(len(DAY_ORDER))
+    for i, day_name in enumerate(DAY_ORDER):
+        is_match = day_name == suggested_day
+        if day_cols[i].button(
+            day_name[:3],
+            key=f"load_day_{day_name}",
+            type="primary" if is_match else "secondary",
+            use_container_width=True,
+            help=f"Load {day_name}'s commitments",
+        ):
+            st.session_state.commitments = commitments_for(day_name)
+            st.session_state.loaded_day = day_name
+            st.session_state.result = None
+            st.rerun()
+
+    if st.session_state.commitments and st.button(
+        "Clear all commitments", key="clear_commitments"
+    ):
+        st.session_state.commitments = []
+        st.session_state.loaded_day = None
+        st.rerun()
+
     with st.form("add_commitment", clear_on_submit=True):
         c_name = st.text_input("Name", key="c_name")
         cc1, cc2 = st.columns(2)
@@ -234,6 +275,10 @@ with col2:
         t_priority = tc1.selectbox("Priority", ["urgent", "important", "low"], key="t_priority")
         t_duration = tc2.number_input("Minutes", min_value=5, max_value=480, value=30, step=5, key="t_duration")
         t_category = tc3.text_input("Category", value="task", key="t_category")
+        st.caption(
+            "Tip: wrap the name in brackets — [Make Resume] — to allow it "
+            "in the morning."
+        )
         if st.form_submit_button("Add task") and t_name:
             st.session_state.tasks.append(
                 {
@@ -268,7 +313,8 @@ if generate:
         commitments = [FixedCommitment(**c) for c in st.session_state.commitments]
         with st.spinner("Planning your day..."):
             blocks, mode, error = plan_day(
-                tasks, commitments, day_start, day_end, force_mode=force_mode
+                tasks, commitments, day_start, day_end,
+                force_mode=force_mode, morning_end=morning_end,
             )
         st.session_state.result = blocks
         st.session_state.mode_used = mode
@@ -311,6 +357,13 @@ if st.session_state.result:
         st.code(json.dumps([asdict(b) for b in st.session_state.result], indent=2), language="json")
 
     st.divider()
+    sync_commitments = st.checkbox(
+        "Include fixed commitments when syncing to Google Calendar",
+        value=True,
+        help="Adds your classes, gym, etc. as events too — not just the "
+             "agent's task blocks. Turn off if they're already on your "
+             "calendar and you don't want duplicates.",
+    )
     retry_col, accept_col = st.columns(2)
 
     with retry_col:
@@ -322,6 +375,7 @@ if st.session_state.result:
                 blocks, mode, error = plan_day(
                     tasks, commitments, day_start, day_end,
                     force_mode=force_mode, previous_blocks=previous,
+                    morning_end=morning_end,
                 )
             st.session_state.result = blocks
             st.session_state.mode_used = mode
@@ -343,27 +397,46 @@ if st.session_state.result:
             )
         elif st.button("✅ Accept & sync to Google Calendar", type="primary", use_container_width=True):
             scheduled = [b for b in st.session_state.result if not b.task.startswith("UNSCHEDULED")]
+
+            # Build one flat list of (summary, start, end, description) so
+            # fixed commitments land on the calendar alongside the agent's
+            # blocks — otherwise the synced day has unexplained gaps where
+            # classes and gym actually sit.
+            to_sync = [
+                (b.task, b.start, b.end, b.rationale) for b in scheduled
+            ]
+            if sync_commitments:
+                to_sync += [
+                    (c["name"], c["start"], c["end"], "Fixed commitment")
+                    for c in st.session_state.commitments
+                ]
+            to_sync.sort(key=lambda x: x[1])
+
             created, failed = 0, []
             with st.spinner("Adding events to your Google Calendar..."):
-                for b in scheduled:
+                for summary, s_str, e_str, desc in to_sync:
                     try:
                         start_dt = dt.datetime.combine(
-                            plan_date, dt.datetime.strptime(b.start, "%H:%M").time()
+                            plan_date, dt.datetime.strptime(s_str, "%H:%M").time()
                         )
                         end_dt = dt.datetime.combine(
-                            plan_date, dt.datetime.strptime(b.end, "%H:%M").time()
+                            plan_date, dt.datetime.strptime(e_str, "%H:%M").time()
                         )
+                        # An end at or before the start means the block runs
+                        # past midnight into the next calendar day.
+                        if end_dt <= start_dt:
+                            end_dt += dt.timedelta(days=1)
                         create_event(
                             st.session_state.gcal_access_token,
-                            summary=b.task,
+                            summary=summary,
                             start_dt=start_dt,
                             end_dt=end_dt,
                             timezone=tz_name,
-                            description=b.rationale,
+                            description=desc,
                         )
                         created += 1
                     except Exception as exc:
-                        failed.append((b.task, str(exc)))
+                        failed.append((summary, str(exc)))
             if created:
                 st.success(f"Added {created} event(s) to your Google Calendar.")
             if failed:
